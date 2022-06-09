@@ -7,5 +7,6 @@ mod tests {
     }
 }
 
-pub mod user;
+// pub mod message;
+// pub mod user;
 pub const MESSAGE_SIZE: usize = 1024;

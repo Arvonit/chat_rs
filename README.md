@@ -1,3 +1,3 @@
 # chat_rs
 
-A rewrite of my chat program in Rust!
+A rewrite of my IRC server and client in Rust.

@@ -9,3 +9,7 @@ edition = "2021"
 shared = { path = "../shared" }
 log = "0.4.14"
 env_logger = "0.9.0"
+rustyline = "9.1.2"
+tui = "0.18"
+crossterm = "0.23"
+quit = "1.1.4"
