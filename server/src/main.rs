@@ -21,7 +21,7 @@ fn main() {
     println!("Listening on {hostname}.");
 
     let users = Arc::new(Mutex::new(HashMap::<Uuid, User>::new()));
-    let channels = Arc::new(Mutex::new(HashMap::<String, Channel>::new()));
+    let channels = Arc::new(Mutex::new(HashMap::<String, Arc<Channel>>::new()));
 
     for stream in listener.incoming() {
         let stream = stream.unwrap();

@@ -1,4 +1,7 @@
-use std::net::{IpAddr, TcpStream};
+use std::{
+    net::{IpAddr, TcpStream},
+    sync::Arc,
+};
 
 use uuid::Uuid;
 
@@ -8,13 +11,13 @@ pub struct User {
     pub nickname: Option<String>,
     pub username: Option<String>,
     pub hostname: String,
-    pub channel: Option<Channel>,
+    pub channel: Option<Arc<Channel>>,
     pub is_registered: bool,
     pub is_away: bool,
     pub stream: TcpStream,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Channel {
     pub id: Uuid,
     pub name: String,

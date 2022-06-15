@@ -12,7 +12,7 @@ use std::{
 use uuid::Uuid;
 
 type UserTable = Mutex<HashMap<Uuid, User>>;
-type ChannelTable = Mutex<HashMap<String, Channel>>;
+type ChannelTable = Mutex<HashMap<String, Arc<Channel>>>;
 
 #[derive(PartialEq)]
 enum CommandResponse {
@@ -53,14 +53,12 @@ pub fn handle_connection(
             .expect("Failed to read message from client.");
 
         // Convert `message` to a String and print it out
-        // TODO: Figure out a way to avoid this mess
         let message_str = str::from_utf8(&message_ascii)
             .expect("Client sent an invalid UTF-8 message.")
             .replace('\0', "");
         println!("{:?}", message_str);
 
         // Extract IRC command from client input
-        // let server_prefix = hostname.to_string();
         let message = match Message::from(&message_str) {
             Ok(message) => message,
             Err(err) => {
@@ -72,7 +70,8 @@ pub fn handle_connection(
             }
         };
 
-        if handle_message(message, &users, user_id, hostname).expect("Failed to parse command.")
+        if handle_message(message, &users, &channels, user_id, hostname)
+            .expect("Failed to parse command.")
             == CommandResponse::Quit
         {
             break;
@@ -89,6 +88,7 @@ pub fn handle_connection(
 fn handle_message<'a>(
     mut message: Message,
     users: &'a UserTable,
+    channels: &'a ChannelTable,
     user_id: Uuid,
     server_prefix: &str,
 ) -> Result<CommandResponse, Box<dyn std::error::Error + 'a>> {
@@ -100,9 +100,6 @@ fn handle_message<'a>(
         .get(&user_id)
         .unwrap()
         .prefix();
-
-    // // Make message immutable
-    // let message = message;
 
     // In order for a user to become registered, the client has to send a NICK message with a valid
     // nickname and a USER message with their username. If all checks pass, they will receieve a
@@ -195,16 +192,17 @@ fn handle_message<'a>(
                 return Ok(CommandResponse::Continue);
             }
 
-            let mut lock = users.lock().expect("Unable to get lock on users table.");
-            let mut user = lock.get_mut(&user_id).unwrap();
-            user.nickname = Some(nickname);
-            let is_registered = user.is_registered;
-            drop(lock);
+            // Update nickname and get the registration state of the user
+            let is_registered = {
+                let mut lock = users.lock().expect("Unable to get lock on users table.");
+                let mut user = lock.get_mut(&user_id).unwrap();
+                user.nickname = Some(nickname);
+                user.is_registered
+            };
 
             // Only broadcast NICK message if user is registered
             if is_registered {
                 broadcast_to_all(&message, &users)?;
-                // broadcast_message(&message, users);
             }
         }
         Command::Away => {
@@ -246,30 +244,44 @@ fn handle_message<'a>(
 
             let recipient = message.params.get(0).unwrap().clone();
 
-            if let Some(nickname_id) = get_nickname_id(&recipient, &users) {
-                let is_away = users
-                    .lock()
-                    .expect("Unable to get lock on users table.")
-                    .get(&nickname_id)
-                    .unwrap()
-                    .is_away;
-                if is_away {
+            // It's not a channel
+            if !recipient.starts_with("#") {
+                if let Some(nickname_id) = get_nickname_id(&recipient, &users) {
+                    let is_away = users
+                        .lock()
+                        .expect("Unable to get lock on users table.")
+                        .get(&nickname_id)
+                        .unwrap()
+                        .is_away;
+                    if is_away {
+                        let response = Response::new(
+                            server_prefix,
+                            ReplyCode::RPL_AWAY,
+                            &[&recipient, "The recipient is marked as away."],
+                        );
+                        send_to_user(&response, &users, user_id)?;
+                    }
+
+                    send_to_user(&message, &users, nickname_id)?;
+                } else {
                     let response = Response::new(
                         server_prefix,
-                        ReplyCode::RPL_AWAY,
-                        &[&recipient, "The recipient is marked as away."],
+                        ReplyCode::ERR_NOSUCHNICK,
+                        &["The given nick was not found."],
                     );
                     send_to_user(&response, &users, user_id)?;
                 }
-
-                send_to_user(&message, &users, nickname_id)?;
             } else {
-                let response = Response::new(
-                    server_prefix,
-                    ReplyCode::ERR_NOSUCHNICK,
-                    &["The given nick was not found."],
-                );
-                send_to_user(&response, &users, user_id)?;
+                if let Some(channel) = channels.lock().unwrap().get(&recipient) {
+                    send_to_channel(&message, &users, channel)?;
+                } else {
+                    let response = Response::new(
+                        server_prefix,
+                        ReplyCode::ERR_NOSUCHCHANNEL,
+                        &["The given channel was not found."],
+                    );
+                    send_to_user(&response, &users, user_id)?;
+                }
             }
         }
         Command::Quit => {
@@ -279,6 +291,8 @@ fn handle_message<'a>(
                 &["User disconnected."],
             );
             send_to_user(&acknowledgement_response, &users, user_id)?;
+
+            // If the user is registered, tell everyone else that the user has left.
             let is_registered = users
                 .lock()
                 .expect("Unable to get lock on users table.")
@@ -288,6 +302,7 @@ fn handle_message<'a>(
             if is_registered {
                 broadcast_message(&message, &users, user_id)?;
             }
+
             return Ok(CommandResponse::Quit);
         }
         Command::Unknown => {
@@ -298,38 +313,61 @@ fn handle_message<'a>(
             );
             send_to_user(&response, &users, user_id)?;
         }
-        // // Command::Join => {
-        // //     let channel_name = match message.params.get(0) {
-        // //         Some(name) => name.clone(),
-        // //         None => {
-        // //             let response = Response::new(
-        // //                 server_prefix,
-        // //                 ReplyCode::ERR_NEEDMOREPARAMS,
-        // //                 &["Specify which channel to join."],
-        // //             );
-        // //             send_to_user(&response, &users, user_id);
-        // //             continue;
-        // //         }
-        // //     };
-        // //
-        // //     // Rust is fucking annoying. If I have the User struct use a reference to a Channel
-        // //     // with lifetimes, it blows up and complains about `channels` being dropped, which
-        // //     // makes no sense. So for now, I'm just cloning the `Channel` type, which is
-        // //     // obviously not ideal.
-        // //     // users.get_mut(&user_id).unwrap().channel = Some(
-        // //     //     channels
-        // //     //         .entry(channel_name.clone())
-        // //     //         .or_insert(Channel::new(&channel_name))
-        // //     //         .value()
-        // //     //         .clone(),
-        // //     // );
-        // // }
-        // // Command::Kick => todo!(),
-        // // Command::Part => todo!(),
-        // // Command::List => todo!(),
-        // // Command::Away => todo!(),
-        // // Command::Ping => todo!(),
-        // // Command::Pong => todo!(),
+        Command::Join => {
+            let channel_name = match message.params.get(0) {
+                Some(name) => name.clone(),
+                None => {
+                    let response = Response::new(
+                        server_prefix,
+                        ReplyCode::ERR_NEEDMOREPARAMS,
+                        &["Specify which channel to join."],
+                    );
+                    send_to_user(&response, &users, user_id)?;
+                    return Ok(CommandResponse::Continue);
+                }
+            };
+
+            // Get a reference to the channel if it is in the channels table, otherwise create it
+            let channel = channels
+                .lock()
+                .unwrap()
+                .entry(channel_name.clone())
+                .or_insert(Arc::new(Channel::new(&channel_name)))
+                .clone();
+
+            // Set the user's channel to the channel from the table
+            users.lock().unwrap().get_mut(&user_id).unwrap().channel = Some(channel);
+            // TODO: Broadcast
+        }
+        // Command::Kick => todo!(),
+        Command::Part => {
+            let channel_name = match message.params.get(0) {
+                Some(name) => name.clone(),
+                None => {
+                    let response = Response::new(
+                        server_prefix,
+                        ReplyCode::ERR_NEEDMOREPARAMS,
+                        &["Specify which channel to join."],
+                    );
+                    send_to_user(&response, &users, user_id)?;
+                    return Ok(CommandResponse::Continue);
+                }
+            };
+
+            let exists = channels.lock().unwrap().get(&channel_name).is_some();
+            if exists {
+                users.lock().unwrap().get_mut(&user_id).unwrap().channel = None;
+                // TODO: Broadcast
+            } else {
+                let response = Response::new(
+                    server_prefix,
+                    ReplyCode::ERR_NOSUCHCHANNEL,
+                    &["The given channel was not found."],
+                );
+                send_to_user(&response, &users, user_id)?;
+            }
+        }
+        Command::List => todo!(),
         _ => {
             // let response = Response {
             //     prefix: server_prefix.to_string(),
@@ -472,6 +510,18 @@ pub fn send_to_user<'a, T: ToIrc>(
         .unwrap()
         .stream
         .write_all(message.to_irc().as_bytes())?)
+}
+
+pub fn send_to_channel<'a, T: ToIrc>(
+    message: &T,
+    users: &'a UserTable,
+    channel: &Arc<Channel>,
+) -> Result<(), Box<dyn std::error::Error + 'a>> {
+    Ok(users
+        .lock()?
+        .iter_mut()
+        .filter(|(_, user)| user.channel == Some(channel.clone()))
+        .for_each(|(_, user)| user.stream.write_all(message.to_irc().as_bytes()).unwrap()))
 }
 
 pub fn broadcast_message<'a, T: ToIrc>(
