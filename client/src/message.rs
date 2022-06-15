@@ -1,8 +1,10 @@
 #![allow(non_camel_case_types)]
+#![allow(unused)]
 
 use std::{
-    fmt::{Display, Formatter},
+    fmt::{Display, Formatter, Write},
     io::{Error, ErrorKind},
+    str::FromStr,
 };
 
 #[derive(Debug)]
@@ -21,7 +23,6 @@ pub struct Response {
 
 #[derive(Debug)]
 pub enum Command {
-    User,
     Nick,
     Join,
     Kick,
@@ -30,9 +31,6 @@ pub enum Command {
     List,
     Away,
     Quit,
-    Error,
-    Ping,
-    Pong,
     Unknown,
 }
 
@@ -88,16 +86,8 @@ pub enum ReplyCode {
     ERR_USERSDONTMATCH = 502,
 }
 
-pub trait ToIrc: ToString {
-    fn to_irc(&self) -> String {
-        format!("{}\r\n", self.to_string())
-    }
-}
-
 impl Message {
-    /// Parse an IRC message from a raw input string. Return a message if the input is formatted
-    /// properly. Otherwise, return an error describing the issue.
-    pub fn from(raw: &str) -> Result<Self, Error> {
+    pub fn from(raw: &str) -> Result<Message, Error> {
         // Trim line ending from input string
         let mut raw = raw.trim_end();
 
@@ -120,7 +110,7 @@ impl Message {
         if command == "" {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
-                "Input string does not contain a command.",
+                "Input string does not contain a command!",
             ));
         }
         // Convert command word to Command enum
@@ -152,19 +142,15 @@ impl Message {
         })
     }
 
-    pub fn new(prefix: Option<String>, command: Command, params: &[&str]) -> Self {
-        Message {
-            prefix,
-            command,
-            params: params.iter().map(|s| s.to_string()).collect(),
-        }
+    pub fn set_prefix(&mut self, prefix: &str) {
+        self.prefix = Some(prefix.to_string());
     }
 
     /// Return the first subsequence of the string separated by a space as well as the rest of the
     /// string. If the string has no spaces, return the input.
     ///
-    /// This is an adjustment to `str::split_once` that returns the original input as well as an
-    /// empty string instead of `None`.
+    /// This is an adjustment to `str::split_once` that returns the input as well as an empty string
+    /// instead of `None`.
     fn get_next_word(input: &str) -> (&str, &str) {
         match input.split_once(" ") {
             Some(pair) => pair,
@@ -173,20 +159,9 @@ impl Message {
     }
 }
 
-impl Response {
-    pub fn new(prefix: &str, code: ReplyCode, params: &[&str]) -> Self {
-        Response {
-            prefix: prefix.to_string(),
-            code,
-            params: params.iter().map(|s| s.to_string()).collect(),
-        }
-    }
-}
-
 impl Command {
     pub fn from_str(input: &str) -> Self {
         match input.to_uppercase().as_str() {
-            "USER" => Command::User,
             "NICK" => Command::Nick,
             "JOIN" => Command::Join,
             "KICK" => Command::Kick,
@@ -195,9 +170,6 @@ impl Command {
             "LIST" => Command::List,
             "AWAY" => Command::Away,
             "QUIT" => Command::Quit,
-            "PING" => Command::Ping,
-            "PONG" => Command::Pong,
-            "ERROR" => Command::Error,
             _ => Command::Unknown,
         }
     }
@@ -238,8 +210,6 @@ impl Display for Message {
     }
 }
 
-impl ToIrc for Message {}
-
 impl Display for Command {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
@@ -265,5 +235,3 @@ impl Display for Response {
         write!(f, ":{} {:03} {}", self.prefix, self.code as u16, arguments)
     }
 }
-
-impl ToIrc for Response {}
